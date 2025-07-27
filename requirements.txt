@@ -17,3 +17,4 @@ python-multipart==0.0.6
 pytest==7.4.3
 pytest-asyncio==0.21.1
 httpx==0.25.2
+coverage==7.3.2           # opcional, para medir cobertura de testes
