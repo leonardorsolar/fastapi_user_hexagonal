@@ -1,359 +1,3 @@
-**tests/test_user_usecase.py**
-
-````python
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-from src.application.usecases.user_usecase import UserUseCase
-from src.application.dtos.user_dto import CreateUserRequest
-from src.domain.entities.user import User
-
-@pytest.fixture
-def mock_user_repository():
-    return AsyncMock()
-
-@pytest.fixture
-def mock_user_domain_service():
-    service = MagicMock()
-    service.validate_user_creation = MagicMock(return_value=(True, []))
-    service.validate_user_update = MagicMock(return_value=(True, []))
-    service.welcome_new_user = AsyncMock(return_value=True)
-    service.calculate_user_category = MagicMock(return_value="adulto")
-    return service
-
-@pytest.fixture
-def user_usecase(mock_user_repository, mock_user_domain_service):
-    return UserUseCase(mock_user_repository, mock_user_domain_service)
-
-@pytest.mark.asyncio
-async def test_create_user_success(user_usecase, mock_user_repository, mock_user_domain_service):
-    # Arrange
-    request = CreateUserRequest(name="João Silva", email="joao@email.com", age=30)
-    mock_user_repository.get_by_email.return_value = None
-    mock_user_repository.create.return_value = User(
-        id="123", name="João Silva", email="joao@email.com", age=30
-    )
-
-    # Act
-    result = await user_usecase.create_user(request)
-
-    # Assert
-    assert result.success is True
-    assert result.user.name == "João Silva"
-    assert result.user.email == "joao@email.com"
-    assert result.user.age == 30
-    mock_user_domain_service.validate_user_creation.assert_called_once()
-    mock_user_domain_service.welcome_new_user.assert_called_once()
-
-@pytest.mark.asyncio
-async def test_create_user_email_already_exists(user_usecase, mock_user_repository):
-    # Arrange
-    request = CreateUserRequest(name="João Silva", email="joao@email.com", age=30)
-    mock_user_repository.get_by_email.return_value =### 5. Application Layer - Use Cases
-
-**src/application/usecases/user_usecase.py**
-```python
-from typing import List, Optional
-from ..dtos.user_dto import (
-    CreateUserRequest, UpdateUserRequest, UserResponse,
-    PaginatedUsersResponse, UserOperationResult, OperationResult
-)
-from ...domain.entities.user import User
-from ...domain.repositories.user_repository import UserRepository
-from ...domain.services.user_service import UserDomainService
-
-class UserUseCase:
-    """
-    Casos de uso para operações com usuários.
-    Implementa a lógica de aplicação seguindo o padrão Command.
-    IMPORTANTE: Esta classe não possui decorators ou dependências de frameworks.
-    """
-
-    def __init__(self, user_repository: UserRepository, user_domain_service: UserDomainService):
-        self._user_repository = user_repository
-        self._user_domain_service = user_domain_service
-
-    async def create_user(self, request: CreateUserRequest) -> UserOperationResult:
-        """Caso de uso: Criar usuário"""
-        try:
-            # Valida dados de entrada
-            is_valid, validation_errors = request.validate()
-            if not is_valid:
-                return UserOperationResult.error_result(
-                    "Dados de entrada inválidos",
-                    validation_errors
-                )
-
-            # Verifica se email já existe
-            existing_user = await self._user_repository.get_by_email(request.email)
-            if existing_user:
-                return UserOperationResult.error_result(
-                    "Email já está em uso",
-                    ["Um usuário com este email já existe"]
-                )
-
-            # Cria entidade de domínio
-            user = User(
-                name=request.name.strip(),
-                email=request.email.lower().strip(),
-                age=request.age
-            )
-
-            # Aplica validações de domínio
-            is_domain_valid, domain_errors = self._user_domain_service.validate_user_creation(user)
-            if not is_domain_valid:
-                return UserOperationResult.error_result(
-                    "Falha na validação de domínio",
-                    domain_errors
-                )
-
-            # Persiste o usuário
-            created_user = await self._user_repository.create(user)
-
-            # Calcula categoria do usuário
-            category = self._user_domain_service.calculate_user_category(created_user)
-
-            # Cria resposta
-            user_response = UserResponse.from_domain(created_user, category)
-
-            # Envia boas-vindas (padrão Observer)
-            await self._user_domain_service.welcome_new_user(created_user)
-
-            return UserOperationResult.success_with_user(
-                user_response,
-                "Usuário criado com sucesso"
-            )
-
-        except Exception as e:
-            return UserOperationResult.error_result(
-                "Erro interno ao criar usuário",
-                [str(e)]
-            )
-
-    async def get_user_by_id(self, user_id: str) -> UserOperationResult:
-        """Caso de uso: Buscar usuário por ID"""
-        try:
-            if not user_id or not isinstance(user_id, str):
-                return UserOperationResult.error_result(
-                    "ID do usuário é obrigatório",
-                    ["ID deve ser uma string não vazia"]
-                )
-
-            user = await self._user_repository.get_by_id(user_id.strip())
-            if not user:
-                return UserOperationResult.error_result(
-                    "Usuário não encontrado",
-                    [f"Nenhum usuário encontrado com ID: {user_id}"]
-                )
-
-            category = self._user_domain_service.calculate_user_category(user)
-            user_response = UserResponse.from_domain(user, category)
-
-            return UserOperationResult.success_with_user(
-                user_response,
-                "Usuário encontrado"
-            )
-
-        except Exception as e:
-            return UserOperationResult.error_result(
-                "Erro interno ao buscar usuário",
-                [str(e)]
-            )
-
-    async def get_all_users(self, skip: int = 0, limit: int = 100) -> tuple[bool, str, PaginatedUsersResponse]:
-        """Caso de uso: Listar usuários com paginação"""
-        try:
-            # Valida parâmetros de paginação
-            if skip < 0:
-                return False, "Skip deve ser >= 0", None
-            if limit < 1 or limit > 1000:
-                return False, "Limit deve estar entre 1 e 1000", None
-
-            # Busca usuários
-            users = await self._user_repository.get_all(skip, limit)
-
-            # Converte para DTOs
-            user_responses = []
-            for user in users:
-                category = self._user_domain_service.calculate_user_category(user)
-                user_response = UserResponse.from_domain(user, category)
-                user_responses.append(user_response)
-
-            # Calcula total (simplificado - em produção usar count otimizado)
-            all_users = await self._user_repository.get_all(0, 999999)
-            total = len(all_users)
-
-            # Cria resposta paginada
-            paginated_response = PaginatedUsersResponse.create(
-                users=user_responses,
-                total=total,
-                skip=skip,
-                limit=limit
-            )
-
-            return True, "Usuários listados com sucesso", paginated_response
-
-        except Exception as e:
-            return False, f"Erro interno ao listar usuários: {str(e)}", None
-
-    async def update_user(self, user_id: str, request: UpdateUserRequest) -> UserOperationResult:
-        """Caso de uso: Atualizar usuário"""
-        try:
-            # Valida parâmetros
-            if not user_id or not isinstance(user_id, str):
-                return UserOperationResult.error_result(
-                    "ID do usuário é obrigatório",
-                    ["ID deve ser uma string não vazia"]
-                )
-
-            # Valida dados de entrada
-            is_valid, validation_errors = request.validate()
-            if not is_valid:
-                return UserOperationResult.error_result(
-                    "Dados de entrada inválidos",
-                    validation_errors
-                )
-
-            # Verifica se há atualizações
-            if not request.has_updates():
-                return UserOperationResult.error_result(
-                    "Nenhum campo para atualizar",
-                    ["Pelo menos um campo deve ser fornecido para atualização"]
-                )
-
-            # Busca usuário existente
-            user = await self._user_repository.get_by_id(user_id.strip())
-            if not user:
-                return UserOperationResult.error_result(
-                    "Usuário não encontrado",
-                    [f"Nenhum usuário encontrado com ID: {user_id}"]
-                )
-
-            # Verifica se novo email já existe (se fornecido)
-            if request.email and request.email.lower().strip() != user.email.lower():
-                existing_user = await self._user_repository.get_by_email(request.email.lower().strip())
-                if existing_user:
-                    return UserOperationResult.error_result(
-                        "Email já está em uso",
-                        ["Um usuário com este email já existe"]
-                    )
-
-            # Atualiza dados do usuário
-            user.update_info(
-                name=request.name.strip() if request.name else None,
-                email=request.email.lower().strip() if request.email else None,
-                age=request.age
-            )
-
-            # Valida usuário atualizado
-            current_data = {"id": user_id}
-            is_domain_valid, domain_errors = self._user_domain_service.validate_user_update(user, current_data)
-            if not is_domain_valid:
-                return UserOperationResult.error_result(
-                    "Falha na validação de domínio",
-                    domain_errors
-                )
-
-            # Persiste as alterações
-            updated_user = await self._user_repository.update(user)
-
-            # Calcula categoria atualizada
-            category = self._user_domain_service.calculate_user_category(updated_user)
-            user_response = UserResponse.from_domain(updated_user, category)
-
-            return UserOperationResult.success_with_user(
-                user_response,
-                "Usuário atualizado com sucesso"
-            )
-
-        except Exception as e:
-            return UserOperationResult.error_result(
-                "Erro interno ao atualizar usuário",
-                [str(e)]
-            )
-
-    async def delete_user(self, user_id: str) -> OperationResult:
-        """Caso de uso: Deletar usuário"""
-        try:
-            if not user_id or not isinstance(user_id, str):
-                return OperationResult.error_result(
-                    "ID do usuário é obrigatório",
-                    ["ID deve ser uma string não vazia"]
-                )
-
-            # Verifica se usuário existe antes de deletar
-            existing_user = await self._user_repository.get_by_id(user_id.strip())
-            if not existing_user:
-                return OperationResult.error_result(
-                    "Usuário não encontrado",
-                    [f"Nenhum usuário encontrado com ID: {user_id}"]
-                )
-
-            # Executa a deleção
-            success = await self._user_repository.delete(user_id.strip())
-
-            if success:
-                return OperationResult.success_result("Usuário deletado com sucesso")
-            else:
-                return OperationResult.error_result(
-                    "Falha ao deletar usuário",
-                    ["Não foi possível deletar o usuário"]
-                )
-
-        except Exception as e:
-            return OperationResult.error_result(
-                "Erro interno ao deletar usuário",
-                [str(e)]
-            )
-
-    async def get_user_by_email(self, email: str) -> UserOperationResult:
-        """Caso de uso: Buscar usuário por email"""
-        try:
-            if not email or not isinstance(email, str):
-                return UserOperationResult.error_result(
-                    "Email é obrigatório",
-                    ["Email deve ser uma string não vazia"]
-                )
-
-            user = await self._user_repository.get_by_email(email.lower().strip())
-            if not user:
-                return UserOperationResult.error_result(
-                    "Usuário não encontrado",
-                    [f"Nenhum usuário encontrado com email: {email}"]
-                )
-
-            category = self._user_domain_service.calculate_user_category(user)
-            user_response = UserResponse.from_domain(user, category)
-
-            return UserOperationResult.success_with_user(
-                user_response,
-                "Usuário encontrado"
-            )
-
-        except Exception as e:
-            return UserOperationResult.error_result(
-                "Erro interno ao buscar usuário por email",
-                [str(e)]
-            )
-
-    async def check_user_permissions(self, user_id: str, action: str) -> tuple[bool, str, bool]:
-        """Caso de uso: Verificar permissões do usuário para uma ação"""
-        try:
-            if not user_id or not action:
-                return False, "ID do usuário e ação são obrigatórios", False
-
-            user = await self._user_repository.get_by_id(user_id.strip())
-            if not user:
-                return False, "Usuário não encontrado", False
-
-            can_perform = self._user_domain_service.can_user_perform_action(user, action.lower())
-
-            message = f"Usuário {'pode' if can_perform else 'não pode'} realizar a ação: {action}"
-            return True, message, can_perform
-
-        except Exception as e:
-            return False, f"Erro ao verificar permissões: {str(e)}", False
-````
-
                 # Tutorial FastAPI - Arquitetura Hexagonal com SOLID e Design Patterns
 
 ## Sumário
@@ -429,6 +73,8 @@ cd fastapi-hexagonal-tutorial
 
 # Criar ambiente virtual
 python -m venv venv
+ou
+python3 -m venv venv
 
 # Ativar ambiente virtual
 # Windows:
@@ -441,6 +87,8 @@ python -m pip install --upgrade pip
 ```
 
 ### 3. Instalação das Dependências
+
+crie o arquivo requirements.txt e adicione o conteúdo a seguir:
 
 **requirements.txt**
 
@@ -471,7 +119,19 @@ httpx==0.25.2
 pip install -r requirements.txt
 ```
 
-### 4. Configuração do FastAPI
+### 4. Criando `.gitignore`:
+
+-   Crie o arquivo `.gitignore` e inclua o seguinte conteudo:
+
+```text
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env/
+```
+
+### 5. Configuração do FastAPI
 
 O FastAPI é um framework web moderno e rápido para construir APIs com Python. Principais características:
 
@@ -4654,3 +4314,359 @@ Acesse a documentação interativa em:
 6. **Qualidade**: Princípios SOLID garantem código limpo
 
 Este tutorial demonstra uma implementação completa seguindo as melhores práticas de arquitetura de software, proporcionando uma base sólida para aplicações empresariais escaláveis.
+
+**tests/test_user_usecase.py**
+
+````python
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+from src.application.usecases.user_usecase import UserUseCase
+from src.application.dtos.user_dto import CreateUserRequest
+from src.domain.entities.user import User
+
+@pytest.fixture
+def mock_user_repository():
+    return AsyncMock()
+
+@pytest.fixture
+def mock_user_domain_service():
+    service = MagicMock()
+    service.validate_user_creation = MagicMock(return_value=(True, []))
+    service.validate_user_update = MagicMock(return_value=(True, []))
+    service.welcome_new_user = AsyncMock(return_value=True)
+    service.calculate_user_category = MagicMock(return_value="adulto")
+    return service
+
+@pytest.fixture
+def user_usecase(mock_user_repository, mock_user_domain_service):
+    return UserUseCase(mock_user_repository, mock_user_domain_service)
+
+@pytest.mark.asyncio
+async def test_create_user_success(user_usecase, mock_user_repository, mock_user_domain_service):
+    # Arrange
+    request = CreateUserRequest(name="João Silva", email="joao@email.com", age=30)
+    mock_user_repository.get_by_email.return_value = None
+    mock_user_repository.create.return_value = User(
+        id="123", name="João Silva", email="joao@email.com", age=30
+    )
+
+    # Act
+    result = await user_usecase.create_user(request)
+
+    # Assert
+    assert result.success is True
+    assert result.user.name == "João Silva"
+    assert result.user.email == "joao@email.com"
+    assert result.user.age == 30
+    mock_user_domain_service.validate_user_creation.assert_called_once()
+    mock_user_domain_service.welcome_new_user.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_create_user_email_already_exists(user_usecase, mock_user_repository):
+    # Arrange
+    request = CreateUserRequest(name="João Silva", email="joao@email.com", age=30)
+    mock_user_repository.get_by_email.return_value =### 5. Application Layer - Use Cases
+
+**src/application/usecases/user_usecase.py**
+```python
+from typing import List, Optional
+from ..dtos.user_dto import (
+    CreateUserRequest, UpdateUserRequest, UserResponse,
+    PaginatedUsersResponse, UserOperationResult, OperationResult
+)
+from ...domain.entities.user import User
+from ...domain.repositories.user_repository import UserRepository
+from ...domain.services.user_service import UserDomainService
+
+class UserUseCase:
+    """
+    Casos de uso para operações com usuários.
+    Implementa a lógica de aplicação seguindo o padrão Command.
+    IMPORTANTE: Esta classe não possui decorators ou dependências de frameworks.
+    """
+
+    def __init__(self, user_repository: UserRepository, user_domain_service: UserDomainService):
+        self._user_repository = user_repository
+        self._user_domain_service = user_domain_service
+
+    async def create_user(self, request: CreateUserRequest) -> UserOperationResult:
+        """Caso de uso: Criar usuário"""
+        try:
+            # Valida dados de entrada
+            is_valid, validation_errors = request.validate()
+            if not is_valid:
+                return UserOperationResult.error_result(
+                    "Dados de entrada inválidos",
+                    validation_errors
+                )
+
+            # Verifica se email já existe
+            existing_user = await self._user_repository.get_by_email(request.email)
+            if existing_user:
+                return UserOperationResult.error_result(
+                    "Email já está em uso",
+                    ["Um usuário com este email já existe"]
+                )
+
+            # Cria entidade de domínio
+            user = User(
+                name=request.name.strip(),
+                email=request.email.lower().strip(),
+                age=request.age
+            )
+
+            # Aplica validações de domínio
+            is_domain_valid, domain_errors = self._user_domain_service.validate_user_creation(user)
+            if not is_domain_valid:
+                return UserOperationResult.error_result(
+                    "Falha na validação de domínio",
+                    domain_errors
+                )
+
+            # Persiste o usuário
+            created_user = await self._user_repository.create(user)
+
+            # Calcula categoria do usuário
+            category = self._user_domain_service.calculate_user_category(created_user)
+
+            # Cria resposta
+            user_response = UserResponse.from_domain(created_user, category)
+
+            # Envia boas-vindas (padrão Observer)
+            await self._user_domain_service.welcome_new_user(created_user)
+
+            return UserOperationResult.success_with_user(
+                user_response,
+                "Usuário criado com sucesso"
+            )
+
+        except Exception as e:
+            return UserOperationResult.error_result(
+                "Erro interno ao criar usuário",
+                [str(e)]
+            )
+
+    async def get_user_by_id(self, user_id: str) -> UserOperationResult:
+        """Caso de uso: Buscar usuário por ID"""
+        try:
+            if not user_id or not isinstance(user_id, str):
+                return UserOperationResult.error_result(
+                    "ID do usuário é obrigatório",
+                    ["ID deve ser uma string não vazia"]
+                )
+
+            user = await self._user_repository.get_by_id(user_id.strip())
+            if not user:
+                return UserOperationResult.error_result(
+                    "Usuário não encontrado",
+                    [f"Nenhum usuário encontrado com ID: {user_id}"]
+                )
+
+            category = self._user_domain_service.calculate_user_category(user)
+            user_response = UserResponse.from_domain(user, category)
+
+            return UserOperationResult.success_with_user(
+                user_response,
+                "Usuário encontrado"
+            )
+
+        except Exception as e:
+            return UserOperationResult.error_result(
+                "Erro interno ao buscar usuário",
+                [str(e)]
+            )
+
+    async def get_all_users(self, skip: int = 0, limit: int = 100) -> tuple[bool, str, PaginatedUsersResponse]:
+        """Caso de uso: Listar usuários com paginação"""
+        try:
+            # Valida parâmetros de paginação
+            if skip < 0:
+                return False, "Skip deve ser >= 0", None
+            if limit < 1 or limit > 1000:
+                return False, "Limit deve estar entre 1 e 1000", None
+
+            # Busca usuários
+            users = await self._user_repository.get_all(skip, limit)
+
+            # Converte para DTOs
+            user_responses = []
+            for user in users:
+                category = self._user_domain_service.calculate_user_category(user)
+                user_response = UserResponse.from_domain(user, category)
+                user_responses.append(user_response)
+
+            # Calcula total (simplificado - em produção usar count otimizado)
+            all_users = await self._user_repository.get_all(0, 999999)
+            total = len(all_users)
+
+            # Cria resposta paginada
+            paginated_response = PaginatedUsersResponse.create(
+                users=user_responses,
+                total=total,
+                skip=skip,
+                limit=limit
+            )
+
+            return True, "Usuários listados com sucesso", paginated_response
+
+        except Exception as e:
+            return False, f"Erro interno ao listar usuários: {str(e)}", None
+
+    async def update_user(self, user_id: str, request: UpdateUserRequest) -> UserOperationResult:
+        """Caso de uso: Atualizar usuário"""
+        try:
+            # Valida parâmetros
+            if not user_id or not isinstance(user_id, str):
+                return UserOperationResult.error_result(
+                    "ID do usuário é obrigatório",
+                    ["ID deve ser uma string não vazia"]
+                )
+
+            # Valida dados de entrada
+            is_valid, validation_errors = request.validate()
+            if not is_valid:
+                return UserOperationResult.error_result(
+                    "Dados de entrada inválidos",
+                    validation_errors
+                )
+
+            # Verifica se há atualizações
+            if not request.has_updates():
+                return UserOperationResult.error_result(
+                    "Nenhum campo para atualizar",
+                    ["Pelo menos um campo deve ser fornecido para atualização"]
+                )
+
+            # Busca usuário existente
+            user = await self._user_repository.get_by_id(user_id.strip())
+            if not user:
+                return UserOperationResult.error_result(
+                    "Usuário não encontrado",
+                    [f"Nenhum usuário encontrado com ID: {user_id}"]
+                )
+
+            # Verifica se novo email já existe (se fornecido)
+            if request.email and request.email.lower().strip() != user.email.lower():
+                existing_user = await self._user_repository.get_by_email(request.email.lower().strip())
+                if existing_user:
+                    return UserOperationResult.error_result(
+                        "Email já está em uso",
+                        ["Um usuário com este email já existe"]
+                    )
+
+            # Atualiza dados do usuário
+            user.update_info(
+                name=request.name.strip() if request.name else None,
+                email=request.email.lower().strip() if request.email else None,
+                age=request.age
+            )
+
+            # Valida usuário atualizado
+            current_data = {"id": user_id}
+            is_domain_valid, domain_errors = self._user_domain_service.validate_user_update(user, current_data)
+            if not is_domain_valid:
+                return UserOperationResult.error_result(
+                    "Falha na validação de domínio",
+                    domain_errors
+                )
+
+            # Persiste as alterações
+            updated_user = await self._user_repository.update(user)
+
+            # Calcula categoria atualizada
+            category = self._user_domain_service.calculate_user_category(updated_user)
+            user_response = UserResponse.from_domain(updated_user, category)
+
+            return UserOperationResult.success_with_user(
+                user_response,
+                "Usuário atualizado com sucesso"
+            )
+
+        except Exception as e:
+            return UserOperationResult.error_result(
+                "Erro interno ao atualizar usuário",
+                [str(e)]
+            )
+
+    async def delete_user(self, user_id: str) -> OperationResult:
+        """Caso de uso: Deletar usuário"""
+        try:
+            if not user_id or not isinstance(user_id, str):
+                return OperationResult.error_result(
+                    "ID do usuário é obrigatório",
+                    ["ID deve ser uma string não vazia"]
+                )
+
+            # Verifica se usuário existe antes de deletar
+            existing_user = await self._user_repository.get_by_id(user_id.strip())
+            if not existing_user:
+                return OperationResult.error_result(
+                    "Usuário não encontrado",
+                    [f"Nenhum usuário encontrado com ID: {user_id}"]
+                )
+
+            # Executa a deleção
+            success = await self._user_repository.delete(user_id.strip())
+
+            if success:
+                return OperationResult.success_result("Usuário deletado com sucesso")
+            else:
+                return OperationResult.error_result(
+                    "Falha ao deletar usuário",
+                    ["Não foi possível deletar o usuário"]
+                )
+
+        except Exception as e:
+            return OperationResult.error_result(
+                "Erro interno ao deletar usuário",
+                [str(e)]
+            )
+
+    async def get_user_by_email(self, email: str) -> UserOperationResult:
+        """Caso de uso: Buscar usuário por email"""
+        try:
+            if not email or not isinstance(email, str):
+                return UserOperationResult.error_result(
+                    "Email é obrigatório",
+                    ["Email deve ser uma string não vazia"]
+                )
+
+            user = await self._user_repository.get_by_email(email.lower().strip())
+            if not user:
+                return UserOperationResult.error_result(
+                    "Usuário não encontrado",
+                    [f"Nenhum usuário encontrado com email: {email}"]
+                )
+
+            category = self._user_domain_service.calculate_user_category(user)
+            user_response = UserResponse.from_domain(user, category)
+
+            return UserOperationResult.success_with_user(
+                user_response,
+                "Usuário encontrado"
+            )
+
+        except Exception as e:
+            return UserOperationResult.error_result(
+                "Erro interno ao buscar usuário por email",
+                [str(e)]
+            )
+
+    async def check_user_permissions(self, user_id: str, action: str) -> tuple[bool, str, bool]:
+        """Caso de uso: Verificar permissões do usuário para uma ação"""
+        try:
+            if not user_id or not action:
+                return False, "ID do usuário e ação são obrigatórios", False
+
+            user = await self._user_repository.get_by_id(user_id.strip())
+            if not user:
+                return False, "Usuário não encontrado", False
+
+            can_perform = self._user_domain_service.can_user_perform_action(user, action.lower())
+
+            message = f"Usuário {'pode' if can_perform else 'não pode'} realizar a ação: {action}"
+            return True, message, can_perform
+
+        except Exception as e:
+            return False, f"Erro ao verificar permissões: {str(e)}", False
+````
